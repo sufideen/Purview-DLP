@@ -1,0 +1,71 @@
+name: Deploy Purview DLP Policies (Simulation)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/Deploy-DLPPolicies.ps1'
+      - '.github/workflows/deploy-dlp-policies.yml'
+  workflow_dispatch: {}
+
+# Least-privilege token: only id-token is needed for OIDC federation to
+# Entra ID; nothing else in this workflow writes back to the repo.
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: purview-dlp-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy-dlp-policies:
+    name: Deploy DLP policies to Security & Compliance (Simulation Mode)
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Confirm PowerShell Core is available
+        shell: pwsh
+        run: $PSVersionTable
+
+      # OIDC / federated credential login — no client secret is stored or
+      # transmitted. This proves the workflow's identity to Entra ID using
+      # the App Registration's federated credential trust for this repo
+      # and branch (see setup instructions).
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Install ExchangeOnlineManagement module
+        shell: pwsh
+        run: |
+          Install-Module -Name ExchangeOnlineManagement -Force -Scope CurrentUser -AllowClobber -Repository PSGallery
+          Import-Module ExchangeOnlineManagement -ErrorAction Stop
+
+      - name: Deploy DLP policies (Simulation Mode)
+        shell: pwsh
+        env:
+          EXO_APP_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          EXO_ORGANIZATION: ${{ vars.EXO_ORGANIZATION }}
+          CERT_BASE64: ${{ secrets.EXO_CERT_BASE64 }}
+          CERT_PASSWORD: ${{ secrets.EXO_CERT_PASSWORD }}
+        run: |
+          $securePassword = if ([string]::IsNullOrEmpty($env:CERT_PASSWORD)) {
+            New-Object System.Security.SecureString
+          } else {
+            ConvertTo-SecureString -String $env:CERT_PASSWORD -AsPlainText -Force
+          }
+
+          ./scripts/Deploy-DLPPolicies.ps1 `
+            -AppId $env:EXO_APP_ID `
+            -Organization $env:EXO_ORGANIZATION `
+            -CertificateBase64 $env:CERT_BASE64 `
+            -CertificatePassword $securePassword
