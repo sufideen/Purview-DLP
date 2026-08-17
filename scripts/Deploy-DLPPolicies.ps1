@@ -120,6 +120,30 @@ function Wait-ForPolicyPropagation {
     throw "Timed out waiting for DLP policy '$Identity' to become visible after creation."
 }
 
+function Wait-ForPolicyMode {
+    param(
+        [string]$Identity,
+        [string]$ExpectedMode,
+        [int]$TimeoutSeconds = 60
+    )
+
+    $elapsed = 0
+    $policy = $null
+    while ($elapsed -lt $TimeoutSeconds) {
+        $policy = Get-DlpCompliancePolicy -Identity $Identity -ErrorAction SilentlyContinue
+        if ($policy -and $policy.Mode -eq $ExpectedMode) {
+            return $policy
+        }
+        Start-Sleep -Seconds 5
+        $elapsed += 5
+    }
+
+    if (-not $policy) {
+        throw "Timed out waiting for DLP policy '$Identity' to become visible."
+    }
+    throw "Safety check failed: policy '$Identity' is in Mode '$($policy.Mode)', expected '$ExpectedMode'. Refusing to leave the tenant in this state."
+}
+
 try {
     Write-Host "==> Preparing certificate material"
     $certBytes = [Convert]::FromBase64String($CertificateBase64)
@@ -168,30 +192,30 @@ try {
             -Policy $PolicyName `
             -Comment 'Flags UK Financial Data, UK NINO and Credit Card Number; would restrict external sharing once promoted out of simulation.' `
             -ContentContainsSensitiveInformation $SensitiveInfoTypes `
+            -AccessScope 'NotInOrganization' `
             -BlockAccess $true `
-            -BlockAccessScope 'NotInOrganization' `
             -Disabled $false | Out-Null
     }
     else {
         Write-Host "==> Rule exists. Converging conditions/actions for '$RuleName'"
         Set-DlpComplianceRule -Identity $RuleName `
             -ContentContainsSensitiveInformation $SensitiveInfoTypes `
+            -AccessScope 'NotInOrganization' `
             -BlockAccess $true `
-            -BlockAccessScope 'NotInOrganization' `
             -Disabled $false | Out-Null
     }
 
     # --- Fail closed if the tenant state isn't actually simulation-only ---
+    # Retried/backoff rather than a single read: Set-DlpCompliancePolicy on the
+    # converge path can take a few seconds to be reflected on read-back, and a
+    # single immediate Get- would otherwise produce a false-positive failure.
     Write-Host "==> Verifying deployed policy is strictly in $RequiredSimulationMode mode"
-    $finalPolicy = Get-DlpCompliancePolicy -Identity $PolicyName
-    if ($finalPolicy.Mode -ne $RequiredSimulationMode) {
-        throw "Safety check failed: policy '$PolicyName' is in Mode '$($finalPolicy.Mode)', expected '$RequiredSimulationMode'. Refusing to leave the tenant in this state."
-    }
+    $finalPolicy = Wait-ForPolicyMode -Identity $PolicyName -ExpectedMode $RequiredSimulationMode
 
     $finalRule = Get-DlpComplianceRule -Identity $RuleName
     Write-Host "==> Deployment complete."
     Write-Host "    Policy : $($finalPolicy.Name) | Mode: $($finalPolicy.Mode) | Exchange: $($finalPolicy.ExchangeLocation) | OneDrive: $($finalPolicy.OneDriveLocation)"
-    Write-Host "    Rule   : $($finalRule.Name) | Disabled: $($finalRule.Disabled) | BlockAccessScope: $($finalRule.BlockAccessScope)"
+    Write-Host "    Rule   : $($finalRule.Name) | Disabled: $($finalRule.Disabled) | AccessScope: $($finalRule.AccessScope)"
 }
 finally {
     if ($tempCertPath -and (Test-Path $tempCertPath)) {
